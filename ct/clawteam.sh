@@ -296,6 +296,13 @@ _community_scripts_mode() {
   color
   catch_errors
 
+  # Patch build_container to fetch OUR bootstrap script instead of the
+  # community-scripts install URL (which doesn't exist for this repo).
+  # bootstrap.sh downloads the full install tree and runs the orchestrator.
+  local _bc_src
+  _bc_src="$(declare -f build_container)"
+  eval "${_bc_src//"https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/install/\${var_install}.sh"/"${REPO_RAW_URL}/install/bootstrap.sh"}"
+
   # ── update_script: called when re-running against an existing container ────
   function update_script() {
     header_info
@@ -321,16 +328,6 @@ _community_scripts_mode() {
 
   start
   build_container
-
-  # build_container runs lxc-attach to fetch the install script from:
-  #   https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/install/clawteam-install.sh
-  # That URL does not exist — community-scripts only hosts scripts submitted
-  # to their own repo.  We therefore push and run OUR install script explicitly
-  # after build_container has set up the container and exported $CTID.
-  msg_info "Running ClawTeam install script inside container ${CTID}"
-  _pct_run_install "${CTID}"
-  msg_ok "ClawTeam install completed"
-
   description
 
   msg_ok "Completed Successfully!\n"

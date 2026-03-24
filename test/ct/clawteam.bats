@@ -238,10 +238,14 @@ PCTSTUB
 
 @test "_pct_run_install: uses REPO_RAW_URL for downloads (not hardcoded community-scripts URL)" {
   assert_file_contains "${HOST_SCRIPT}" 'REPO_RAW_URL'
-  # Must NOT fetch from community-scripts repo in executable code (comments allowed)
-  if grep -vE '^\s*#' "${HOST_SCRIPT}" | grep -qF 'community-scripts/ProxmoxVE/main/install'; then
-    fail "Found community-scripts install URL in executable code — must use REPO_RAW_URL"
-  fi
+  # community-scripts URL may appear only in comments or in the eval patch
+  # (where it is the string being replaced, not a URL being fetched)
+  local bad_lines
+  bad_lines=$(grep -vE '^\s*#' "${HOST_SCRIPT}" \
+    | grep 'community-scripts/ProxmoxVE/main/install' \
+    | grep -v 'eval\|_bc_src' || true)
+  [[ -z "${bad_lines}" ]] \
+    || fail "Found community-scripts install URL outside patch/eval context:\n${bad_lines}"
 }
 
 @test "modules use BASH_SOURCE[-1] to locate common.sh (works when sourced)" {
@@ -283,17 +287,21 @@ PCTSTUB
   done
 }
 
-@test "community-scripts mode calls _pct_run_install after build_container" {
-  # build_container fetches from community-scripts/ProxmoxVE — a URL that
-  # does not host our script. _pct_run_install must be called explicitly
-  # after build_container to push and run our install script.
-  local build_line install_line
-  build_line=$(grep -n '^\s*build_container$' "${HOST_SCRIPT}" | head -1 | cut -d: -f1)
-  install_line=$(grep -n '_pct_run_install' "${HOST_SCRIPT}" | tail -1 | cut -d: -f1)
-  [[ -n "${build_line}" ]]  || fail "build_container call not found"
-  [[ -n "${install_line}" ]] || fail "_pct_run_install call not found"
-  [[ "${install_line}" -gt "${build_line}" ]] \
-    || fail "_pct_run_install (line ${install_line}) must come AFTER build_container (line ${build_line})"
+@test "community-scripts mode patches build_container to use bootstrap.sh" {
+  # build_container fetches from community-scripts/ProxmoxVE/main/install/${var_install}.sh
+  # which does not exist for this repo. We rewrite that URL at runtime to
+  # point to our bootstrap.sh which downloads the full install tree.
+  assert_file_contains "${HOST_SCRIPT}" 'bootstrap.sh'
+  assert_file_contains "${HOST_SCRIPT}" 'declare -f build_container'
+}
+
+@test "install/bootstrap.sh exists and downloads full install tree" {
+  local bs="${PROJECT_ROOT}/install/bootstrap.sh"
+  assert_file_exists "${bs}"
+  assert_file_contains "${bs}" 'lib/common.sh'
+  assert_file_contains "${bs}" 'modules/01-system-deps.sh'
+  assert_file_contains "${bs}" 'modules/07-motd.sh'
+  assert_file_contains "${bs}" 'clawteam-install.sh'
 }
 
 @test "community-scripts mode echo uses \${CTID} not literal string" {
