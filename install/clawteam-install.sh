@@ -19,7 +19,10 @@
 #   Single module only (e.g. re-run just the systemd step):
 #     bash install/modules/06-systemd.sh
 
-set -Eeuo pipefail
+# Note: do NOT set -u here — the community-scripts verb_ip6() function
+# references $SSH_CLIENT which may be unset in non-SSH environments.
+# catch_errors() (called below after verb_ip6) installs set -Eeuo pipefail.
+# In standalone mode each module sets its own error handling.
 
 # ── Locate the modules directory relative to this script ─────────────────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
