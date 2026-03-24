@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  # ── ShellCheck static analysis ──────────────────────────────────────────────
+  shellcheck:
+    name: ShellCheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install ShellCheck
+        run: sudo apt-get install -y shellcheck
+
+      - name: Lint ct/clawteam.sh
+        # SC1090: dynamic source <(curl ...) — expected pattern for community-scripts
+        # SC2034: APP/var_* appear unused locally (consumed by sourced build.func)
+        run: shellcheck --exclude=SC1090,SC2034 ct/clawteam.sh
+
+      - name: Lint install/clawteam-install.sh
+        # SC1090: dynamic source via FUNCTIONS_FILE_PATH — expected pattern
+        # SC2154: STD / msg_* set by the sourced shim at runtime
+        run: shellcheck --exclude=SC1090,SC2154 install/clawteam-install.sh
+
+  # ── BATS unit tests (host-script logic, no root required) ───────────────────
+  bats-unit:
+    name: BATS unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Run ct/clawteam.bats
+        run: ./test/bats/bin/bats --tap test/ct/clawteam.bats
+
+  # ── BATS integration tests (install script, requires root in a container) ───
+  bats-integration:
+    name: BATS integration tests (root)
+    runs-on: ubuntu-latest
+    # Run the job as root inside a Debian container that mirrors the target LXC
+    container:
+      image: debian:trixie
+      options: --user root
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install test dependencies
+        run: |
+          apt-get update -qq
+          apt-get install -y --no-install-recommends \
+            curl git tmux python3 python3-pip python3-venv \
+            build-essential libzmq3-dev nodejs npm \
+            shellcheck
+
+      - name: Run install script tests (root, Debian Trixie container)
+        run: ./test/bats/bin/bats --tap test/install/clawteam-install.bats
+
+      - name: Run ct script tests (root)
+        run: ./test/bats/bin/bats --tap test/ct/clawteam.bats
