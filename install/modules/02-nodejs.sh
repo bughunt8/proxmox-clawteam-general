@@ -8,7 +8,7 @@
 #   bash install/modules/02-nodejs.sh
 
 set -Eeuo pipefail
-source "$(dirname "${BASH_SOURCE[0]}")/../lib/common.sh"
+source "$(dirname "${BASH_SOURCE[-1]}")/../lib/common.sh"
 
 if module_done "02-nodejs"; then
   msg_ok "Node.js already installed — skipping."

@@ -28,7 +28,8 @@ set -Eeo pipefail
 # ── Application metadata ──────────────────────────────────────────────────────
 
 APP="ClawTeam"
-INSTALL_SCRIPT_URL="https://raw.githubusercontent.com/bughunt8/proxmox-clawteam-general/main/install/clawteam-install.sh"
+REPO_RAW_URL="https://raw.githubusercontent.com/bughunt8/proxmox-clawteam-general/main"
+INSTALL_SCRIPT_URL="${REPO_RAW_URL}/install/clawteam-install.sh"
 
 # ── Default LXC configuration ─────────────────────────────────────────────────
 # All defaults can be overridden via environment variables when running
@@ -173,29 +174,53 @@ _pct_standalone() {
 }
 
 # _pct_run_install CTID
-#   Pushes the install script into the container and executes it via pct exec.
-#   Can be called from both standalone and community-scripts modes once the
-#   container is running.
+#   Delivers the full install tree into the container and executes the
+#   orchestrator.  Works in two modes:
+#
+#   Local (development): the repo is checked out alongside ct/clawteam.sh.
+#     All files under install/ are pushed with pct push.
+#
+#   Remote (production curl invocation): files are downloaded from GitHub
+#     directly inside the container using a single bootstrap command.
+#
 _pct_run_install() {
   local ctid="$1"
-  local install_script_path="/tmp/clawteam-install.sh"
-  local local_script
-  # Prefer a local copy of the install script (useful for development)
-  local_script="$(dirname "${BASH_SOURCE[0]}")/../install/clawteam-install.sh"
+  local install_root="/tmp/clawteam-install"
+  local local_install_dir
+  local_install_dir="$(dirname "${BASH_SOURCE[0]}")/../install"
 
-  if [[ -f "${local_script}" ]]; then
-    _info "Pushing local install script into container ${ctid}..."
-    pct push "${ctid}" "${local_script}" "${install_script_path}" \
-      --perms 0755 --user root
+  if [[ -d "${local_install_dir}" ]]; then
+    # ── Local mode: push every file preserving directory structure ──────────
+    _info "Pushing local install tree into container ${ctid}..."
+    local f
+    while IFS= read -r -d '' f; do
+      local rel="${f#"${local_install_dir}/"}"
+      local dest="${install_root}/${rel}"
+      pct exec "${ctid}" -- mkdir -p "$(dirname "${dest}")"
+      pct push "${ctid}" "${f}" "${dest}" --perms 0755 --user root
+    done < <(find "${local_install_dir}" -type f -print0)
   else
-    _info "Downloading install script into container ${ctid}..."
-    pct exec "${ctid}" -- bash -c \
-      "curl -fsSL '${INSTALL_SCRIPT_URL}' -o '${install_script_path}' && chmod 755 '${install_script_path}'"
+    # ── Remote mode: bootstrap the full tree inside the container ───────────
+    _info "Downloading install tree into container ${ctid}..."
+    pct exec "${ctid}" -- bash -c "
+      set -e
+      BASE='${REPO_RAW_URL}'
+      ROOT='${install_root}'
+      dl() { mkdir -p \"\$(dirname \"\${ROOT}/\$1\")\"; curl -fsSL \"\${BASE}/install/\$1\" -o \"\${ROOT}/\$1\"; chmod 755 \"\${ROOT}/\$1\"; }
+      dl 'clawteam-install.sh'
+      dl 'lib/common.sh'
+      dl 'modules/01-system-deps.sh'
+      dl 'modules/02-nodejs.sh'
+      dl 'modules/03-openclaw.sh'
+      dl 'modules/04-clawteam.sh'
+      dl 'modules/05-workspace.sh'
+      dl 'modules/06-systemd.sh'
+      dl 'modules/07-motd.sh'
+    "
   fi
 
   _info "Running install script inside container ${ctid}..."
-  # Run in standalone mode inside the container (no FUNCTIONS_FILE_PATH needed)
-  pct exec "${ctid}" -- bash "${install_script_path}"
+  pct exec "${ctid}" -- bash "${install_root}/clawteam-install.sh"
   _ok "Install script completed inside container ${ctid}."
 }
 

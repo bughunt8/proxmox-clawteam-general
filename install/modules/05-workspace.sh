@@ -8,7 +8,7 @@
 #   bash install/modules/05-workspace.sh
 
 set -Eeuo pipefail
-source "$(dirname "${BASH_SOURCE[0]}")/../lib/common.sh"
+source "$(dirname "${BASH_SOURCE[-1]}")/../lib/common.sh"
 
 WORKSPACE_ROOT="${WORKSPACE_ROOT:-/root/workspace}"
 WORKSPACE_NAME="${WORKSPACE_NAME:-openclaw-workspace}"

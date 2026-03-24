@@ -217,7 +217,7 @@ PCTSTUB
   assert_file_contains "${HOST_SCRIPT}" '\-\-onboot'
 }
 
-@test "_pct_run_install: uses pct push to copy install script" {
+@test "_pct_run_install: uses pct push for local mode (dev)" {
   assert_file_contains "${HOST_SCRIPT}" 'pct push'
 }
 
@@ -225,8 +225,30 @@ PCTSTUB
   assert_file_contains "${HOST_SCRIPT}" 'pct exec'
 }
 
-@test "_pct_run_install: sets perms 0755 when pushing script" {
+@test "_pct_run_install: sets perms 0755 when pushing files locally" {
   assert_file_contains "${HOST_SCRIPT}" '0755'
+}
+
+@test "_pct_run_install: downloads full install tree in remote mode (not just orchestrator)" {
+  # Must download lib/common.sh and all modules, not just clawteam-install.sh
+  assert_file_contains "${HOST_SCRIPT}" "lib/common.sh"
+  assert_file_contains "${HOST_SCRIPT}" "modules/01-system-deps.sh"
+  assert_file_contains "${HOST_SCRIPT}" "modules/07-motd.sh"
+}
+
+@test "_pct_run_install: uses REPO_RAW_URL for downloads (not hardcoded community-scripts URL)" {
+  assert_file_contains "${HOST_SCRIPT}" 'REPO_RAW_URL'
+  # Must NOT fetch from community-scripts repo in executable code (comments allowed)
+  if grep -vE '^\s*#' "${HOST_SCRIPT}" | grep -qF 'community-scripts/ProxmoxVE/main/install'; then
+    fail "Found community-scripts install URL in executable code — must use REPO_RAW_URL"
+  fi
+}
+
+@test "modules use BASH_SOURCE[-1] to locate common.sh (works when sourced)" {
+  for mod in "${PROJECT_ROOT}/install/modules/"*.sh; do
+    grep -qF 'BASH_SOURCE[-1]' "${mod}" \
+      || fail "$(basename "${mod}") uses BASH_SOURCE[0] — must use BASH_SOURCE[-1] to resolve path correctly when sourced"
+  done
 }
 
 # ===========================================================================
@@ -294,8 +316,8 @@ PCTSTUB
   fi
 }
 
-@test "host script uses INSTALL_SCRIPT_URL for remote install" {
-  assert_file_contains "${HOST_SCRIPT}" 'INSTALL_SCRIPT_URL'
+@test "host script defines REPO_RAW_URL for all remote downloads" {
+  assert_file_contains "${HOST_SCRIPT}" 'REPO_RAW_URL'
 }
 
 # ===========================================================================
