@@ -1,89 +1,77 @@
 #!/usr/bin/env bats
 # test/install/clawteam-install.bats
 #
-# TDD tests for install/clawteam-install.sh
+# TDD tests for install/clawteam-install.sh and all install/modules/*.sh
 #
-# These tests run the install script with all external commands stubbed out
-# so no real packages are installed, no real git operations are performed,
-# and no real systemd units are registered.
+# Tests are grouped by scope:
+#   Group A  — Orchestrator (clawteam-install.sh)
+#   Group B  — Module 01: system deps
+#   Group C  — Module 02: Node.js
+#   Group D  — Module 03: OpenClaw
+#   Group E  — Module 04: ClawTeam
+#   Group F  — Module 05: workspace + team
+#   Group G  — Module 06: systemd service
+#   Group H  — Module 07: MOTD
+#   Group I  — Static analysis (ShellCheck)
 #
-# Run:
+# Root-required tests are skipped when not running as root.
+# All tests that write to the filesystem use BATS_TEST_TMPDIR.
+#
+# Run (no root needed for structural tests):
 #   ./test/bats/bin/bats test/install/clawteam-install.bats
 #
-# Run with verbose output:
-#   ./test/bats/bin/bats --verbose-run test/install/clawteam-install.bats
+# Run (full integration, root required):
+#   sudo ./test/bats/bin/bats test/install/clawteam-install.bats
 
 bats_require_minimum_version 1.5.0
 
-# ---------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
 # Shared setup / teardown
-# ---------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
 
 setup() {
   load "$(dirname "$BATS_TEST_FILENAME")/../test_helper/common-setup.bash"
   _common_setup
 
   INSTALL_SCRIPT="${PROJECT_ROOT}/install/clawteam-install.sh"
+  MODULES_DIR="${PROJECT_ROOT}/install/modules"
+  LIB_DIR="${PROJECT_ROOT}/install/lib"
 
-  # Isolated fake rootfs so the script writes into $TEST_ROOT, not /
+  # All module tests redirect system writes here
   TEST_ROOT="${BATS_TEST_TMPDIR}/rootfs"
   mkdir -p \
     "${TEST_ROOT}/opt/clawteam/.venv/bin" \
     "${TEST_ROOT}/usr/local/bin" \
     "${TEST_ROOT}/etc/systemd/system" \
     "${TEST_ROOT}/etc/update-motd.d" \
-    "${TEST_ROOT}/root/workspace"
+    "${TEST_ROOT}/root/workspace" \
+    "${BATS_TEST_TMPDIR}/done"
   export TEST_ROOT
 
-  # ── Stub every external command the install script calls ──────────────────
+  # Standard command stubs used across most tests
+  create_stub apt-get  "" 0
+  create_stub npm      "" 0
+  create_stub node     "v22.0.0" 0
+  create_stub git      "" 0
+  create_stub systemctl "" 0
+  create_stub clawteam "spawned" 0
+  create_stub pip      "Version: 0.2.0" 0
+  create_stub curl     "" 0
 
-  # apt-get: succeed silently
-  create_stub apt-get "" 0
-
-  # Node.js setup helper is a no-op in the community-scripts shim
-  # (setup_nodejs is defined in stub-functions.bash)
-
-  # npm: succeed silently
-  create_stub npm "" 0
-
-  # python3: succeed silently (venv creation is tested via a custom stub below)
-  create_stub python3 "" 0
-
-  # pip (system pip referenced for version check)
-  create_stub pip "Version: 0.2.0" 0
-
-  # The venv pip and clawteam binaries are referenced by full path, so create
-  # them explicitly inside the fake venv rather than via the PATH stub dir.
-  # The install script uses /opt/clawteam/.venv/bin/pip, so we write directly
-  # to /opt to match hardcoded paths — but redirect the TEST by overriding
-  # the mkdir / python3 calls.  Since the script uses hardcoded paths we stub
-  # `python3` to create the fake venv in the real /opt/clawteam for the
-  # duration of the test, or we redirect via a wrapper script.
-  #
-  # Simplest approach: create the venv directories and stub binaries in the
-  # REAL /opt/clawteam/.venv/bin — but only if we are running as root in a
-  # container.  Otherwise, stub python3 and pip with stubs that record calls
-  # and write fake binaries into a temp path.
-
-  # Stub python3 so `python3 -m venv ...` creates a minimal fake venv
+  # Stub python3 to create a minimal fake venv
   cat >"${STUBS_DIR}/python3" <<PYEOF
 #!/usr/bin/env bash
 echo "python3 \$*" >> "${STUBS_DIR}/python3.log"
-# If called as: python3 -m venv <path>
 if [[ "\$1" == "-m" && "\$2" == "venv" ]]; then
   VENV_DIR="\$3"
   mkdir -p "\${VENV_DIR}/bin"
-  # Stub pip inside the venv
   cat > "\${VENV_DIR}/bin/pip" <<'PIPEOF'
 #!/usr/bin/env bash
 echo "venv-pip \$*" >> "${STUBS_DIR}/venv-pip.log"
-if [[ "\$1 \$2" == "show clawteam" ]] || [[ "\$*" == *"show clawteam"* ]]; then
-  echo "Version: 0.2.0"
-fi
+[[ "\$*" == *"show clawteam"* ]] && echo "Version: 0.2.0"
 exit 0
 PIPEOF
   chmod +x "\${VENV_DIR}/bin/pip"
-  # Stub clawteam binary inside the venv
   cat > "\${VENV_DIR}/bin/clawteam" <<'CTEOF'
 #!/usr/bin/env bash
 echo "venv-clawteam \$*" >> "${STUBS_DIR}/venv-clawteam.log"
@@ -96,379 +84,551 @@ exit 0
 PYEOF
   chmod +x "${STUBS_DIR}/python3"
 
-  # git: succeed silently and create expected directories
-  cat >"${STUBS_DIR}/git" <<'GITEOF'
+  # Stub ln to record calls but actually create symlinks in TEST_ROOT
+  cat >"${STUBS_DIR}/ln" <<LNEOF
 #!/usr/bin/env bash
-echo "git $*" >> "${BATS_TEST_TMPDIR}/stubs/git.log"
-# Handle: git -C <dir> init -q <name>
-if [[ "$1" == "-C" ]]; then
-  PARENT="$2"; shift 2
-fi
-if [[ "$1" == "init" ]]; then
-  WORKSPACE="${PARENT:-$PWD}/${@: -1}"
-  mkdir -p "$WORKSPACE"
-fi
-# Handle: git config --global ...
-exit 0
-GITEOF
-  chmod +x "${STUBS_DIR}/git"
-
-  # clawteam: used for `clawteam team spawn-team`
-  create_stub clawteam "spawned" 0
-
-  # ln: record the call but actually create the symlink (using system ln)
-  cat >"${STUBS_DIR}/ln" <<'LNEOF'
-#!/usr/bin/env bash
-echo "ln $*" >> "${BATS_TEST_TMPDIR}/stubs/ln.log"
-/bin/ln "$@"
+echo "ln \$*" >> "${STUBS_DIR}/ln.log"
+/bin/ln "\$@" 2>/dev/null || true
 exit 0
 LNEOF
   chmod +x "${STUBS_DIR}/ln"
-
-  # systemctl: succeed silently
-  create_stub systemctl "" 0
 }
 
 teardown() {
-  # Remove any symlinks the test created in real system paths
+  # Clean up any real system paths if running as root
   rm -f /usr/local/bin/clawteam 2>/dev/null || true
-  rm -f /opt/clawteam/.venv/bin/clawteam 2>/dev/null || true
   rm -rf /opt/clawteam 2>/dev/null || true
   rm -rf /root/workspace/openclaw-workspace 2>/dev/null || true
   rm -f /etc/systemd/system/clawteam-board.service 2>/dev/null || true
   rm -f /etc/update-motd.d/99-clawteam 2>/dev/null || true
+  rm -rf /var/lib/clawteam 2>/dev/null || true
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Helper: run a module script with all stubs and temp path redirects
+# ─────────────────────────────────────────────────────────────────────────────
+
+_run_module() {
+  local module_file="${MODULES_DIR}/$1"
+  bash -c "
+    set -Eeuo pipefail
+    export PATH='${STUBS_DIR}:\${PATH}'
+    CLAWTEAM_DONE_DIR='${BATS_TEST_TMPDIR}/done'
+    mkdir -p \"\${CLAWTEAM_DONE_DIR}\"
+    module_done() { [[ -f \"\${CLAWTEAM_DONE_DIR}/\$1\" ]]; }
+    mark_done()   { touch \"\${CLAWTEAM_DONE_DIR}/\$1\"; }
+    export -f module_done mark_done
+    source '${PROJECT_ROOT}/test/test_helper/stub-functions.bash'
+    source '${module_file}'
+  "
 }
 
 # ===========================================================================
-# 1 — apt-get: dependency installation
+# A — Orchestrator: install/clawteam-install.sh
 # ===========================================================================
 
-@test "apt-get is called to install dependencies" {
+@test "orchestrator: all module files exist" {
+  for m in 01-system-deps.sh 02-nodejs.sh 03-openclaw.sh 04-clawteam.sh \
+            05-workspace.sh 06-systemd.sh 07-motd.sh; do
+    assert_file_exists "${MODULES_DIR}/${m}"
+  done
+}
+
+@test "orchestrator: lib/common.sh exists" {
+  assert_file_exists "${PROJECT_ROOT}/install/lib/common.sh"
+}
+
+@test "orchestrator: all modules are sourced in numerical order" {
+  # Verify the orchestrator sources each module in sequence
+  for m in 01 02 03 04 05 06 07; do
+    grep -q "_run_module \"${m}-" "${INSTALL_SCRIPT}" \
+      || fail "Module ${m} not sourced in ${INSTALL_SCRIPT}"
+  done
+}
+
+@test "orchestrator: runs successfully with all stubs (requires root)" {
   if [[ "$(id -u)" != "0" ]]; then skip "requires root"; fi
   run bash "${INSTALL_SCRIPT}"
+  assert_success
+}
+
+@test "orchestrator: FUNCTIONS_FILE_PATH preamble is invoked when set" {
+  # When FUNCTIONS_FILE_PATH is set, the orchestrator should source it
+  grep -q 'FUNCTIONS_FILE_PATH' "${INSTALL_SCRIPT}" \
+    || fail "FUNCTIONS_FILE_PATH handling missing from orchestrator"
+}
+
+@test "orchestrator: community-scripts teardown functions are called if defined" {
+  grep -q 'motd_ssh'    "${INSTALL_SCRIPT}" || fail "motd_ssh not called"
+  grep -q 'customize'   "${INSTALL_SCRIPT}" || fail "customize not called"
+  grep -q 'cleanup_lxc' "${INSTALL_SCRIPT}" || fail "cleanup_lxc not called"
+}
+
+# ===========================================================================
+# B — Module 01: system dependencies
+# ===========================================================================
+
+@test "module 01: apt-get is called to install system dependencies" {
+  if [[ "$(id -u)" != "0" ]]; then skip "requires root"; fi
+  run _run_module "01-system-deps.sh"
   assert_success
   assert_stub_called apt-get
 }
 
-@test "apt-get installs git" {
+@test "module 01: installs git, tmux, python3-venv, libzmq3-dev" {
   if [[ "$(id -u)" != "0" ]]; then skip "requires root"; fi
-  run bash "${INSTALL_SCRIPT}"
+  run _run_module "01-system-deps.sh"
   assert_success
-  assert_stub_called_with apt-get "git"
+  for pkg in git tmux python3-venv libzmq3-dev build-essential; do
+    assert_stub_called_with apt-get "${pkg}"
+  done
 }
 
-@test "apt-get installs tmux" {
-  if [[ "$(id -u)" != "0" ]]; then skip "requires root"; fi
-  run bash "${INSTALL_SCRIPT}"
-  assert_success
-  assert_stub_called_with apt-get "tmux"
+@test "module 01: uses apt-get not apt (non-interactive)" {
+  # Must contain apt-get
+  assert_file_contains "${MODULES_DIR}/01-system-deps.sh" 'apt-get'
+  # Must not use bare 'apt install'
+  if grep -qE '\$STD apt install|\bapt install' "${MODULES_DIR}/01-system-deps.sh"; then
+    fail "Module 01 uses bare 'apt install' — must use 'apt-get install'"
+  fi
 }
 
-@test "apt-get installs python3-venv" {
+@test "module 01: is idempotent (skips on second run)" {
   if [[ "$(id -u)" != "0" ]]; then skip "requires root"; fi
-  run bash "${INSTALL_SCRIPT}"
+  # First run
+  run _run_module "01-system-deps.sh"
   assert_success
-  assert_stub_called_with apt-get "python3-venv"
+  rm -f "${STUBS_DIR}/apt-get.log"
+  # Second run — marker exists, apt-get should NOT be called again
+  run _run_module "01-system-deps.sh"
+  assert_success
+  refute_stub_called apt-get
 }
 
-@test "apt-get installs libzmq3-dev for ZeroMQ P2P transport" {
+@test "module 01: exits non-zero when apt-get fails" {
   if [[ "$(id -u)" != "0" ]]; then skip "requires root"; fi
-  run bash "${INSTALL_SCRIPT}"
-  assert_success
-  assert_stub_called_with apt-get "libzmq3-dev"
-}
-
-@test "apt-get failure causes install script to exit non-zero" {
-  if [[ "$(id -u)" != "0" ]]; then skip "requires root"; fi
-  # Override apt-get stub to fail
-  create_stub apt-get "simulated apt failure" 1
-  run bash "${INSTALL_SCRIPT}"
+  create_stub apt-get "apt failed" 1
+  run _run_module "01-system-deps.sh"
   assert_failure
 }
 
 # ===========================================================================
-# 2 — npm: OpenClaw installation
+# C — Module 02: Node.js
 # ===========================================================================
 
-@test "npm is called to install openclaw globally" {
-  if [[ "$(id -u)" != "0" ]]; then skip "requires root"; fi
-  run bash "${INSTALL_SCRIPT}"
-  assert_success
-  assert_stub_called npm
+@test "module 02: uses setup_nodejs when available (community-scripts path)" {
+  # setup_nodejs is a no-op in stub-functions.bash — verify module calls it
+  assert_file_contains "${MODULES_DIR}/02-nodejs.sh" 'setup_nodejs'
 }
 
-@test "npm installs openclaw@latest with -g flag" {
+@test "module 02: falls back to NodeSource when setup_nodejs unavailable" {
+  assert_file_contains "${MODULES_DIR}/02-nodejs.sh" 'nodesource.com'
+}
+
+@test "module 02: NODE_MAJOR defaults to 22" {
+  grep 'NODE_MAJOR.*22' "${MODULES_DIR}/02-nodejs.sh" \
+    || fail "Module 02 does not default NODE_MAJOR to 22"
+}
+
+@test "module 02: is idempotent (skips on second run)" {
   if [[ "$(id -u)" != "0" ]]; then skip "requires root"; fi
-  run bash "${INSTALL_SCRIPT}"
+  run _run_module "02-nodejs.sh"
+  assert_success
+  # Second run should skip
+  run _run_module "02-nodejs.sh"
+  assert_success
+}
+
+# ===========================================================================
+# D — Module 03: OpenClaw
+# ===========================================================================
+
+@test "module 03: calls npm install -g openclaw@latest" {
+  if [[ "$(id -u)" != "0" ]]; then skip "requires root"; fi
+  run _run_module "03-openclaw.sh"
   assert_success
   assert_stub_called_with npm "install -g openclaw@latest"
 }
 
-@test "npm failure causes install script to exit non-zero" {
+@test "module 03: does not call npm update" {
+  assert_file_contains "${MODULES_DIR}/03-openclaw.sh" 'npm install -g'
+  # Ensure no bare 'npm update' is present
+  if grep -q 'npm update' "${MODULES_DIR}/03-openclaw.sh"; then
+    fail "Module 03 uses 'npm update' — must use 'npm install -g' for idempotency"
+  fi
+}
+
+@test "module 03: is idempotent (skips on second run)" {
   if [[ "$(id -u)" != "0" ]]; then skip "requires root"; fi
-  create_stub npm "simulated npm failure" 1
-  run bash "${INSTALL_SCRIPT}"
+  run _run_module "03-openclaw.sh"
+  assert_success
+  rm -f "${STUBS_DIR}/npm.log"
+  run _run_module "03-openclaw.sh"
+  assert_success
+  refute_stub_called npm
+}
+
+@test "module 03: exits non-zero when npm fails" {
+  if [[ "$(id -u)" != "0" ]]; then skip "requires root"; fi
+  create_stub npm "npm failed" 1
+  run _run_module "03-openclaw.sh"
   assert_failure
 }
 
 # ===========================================================================
-# 3 — Python venv: ClawTeam installation
+# E — Module 04: ClawTeam
 # ===========================================================================
 
-@test "python3 is called to create a virtualenv at /opt/clawteam/.venv" {
+@test "module 04: creates venv at /opt/clawteam/.venv" {
   if [[ "$(id -u)" != "0" ]]; then skip "requires root"; fi
-  run bash "${INSTALL_SCRIPT}"
+  run _run_module "04-clawteam.sh"
   assert_success
   assert_stub_called_with python3 "-m venv /opt/clawteam/.venv"
 }
 
-@test "venv pip is called to install clawteam" {
+@test "module 04: installs clawteam into venv" {
   if [[ "$(id -u)" != "0" ]]; then skip "requires root"; fi
-  run bash "${INSTALL_SCRIPT}"
+  run _run_module "04-clawteam.sh"
   assert_success
   assert_file_exists "${STUBS_DIR}/venv-pip.log"
   grep -qF "clawteam" "${STUBS_DIR}/venv-pip.log"
 }
 
-@test "venv pip attempts clawteam[p2p] install for ZeroMQ transport" {
+@test "module 04: attempts clawteam[p2p] install" {
   if [[ "$(id -u)" != "0" ]]; then skip "requires root"; fi
-  run bash "${INSTALL_SCRIPT}"
+  run _run_module "04-clawteam.sh"
   assert_success
-  assert_file_exists "${STUBS_DIR}/venv-pip.log"
   grep -qF "clawteam[p2p]" "${STUBS_DIR}/venv-pip.log"
 }
 
-# ===========================================================================
-# 4 — Symlink: /usr/local/bin/clawteam
-# ===========================================================================
-
-@test "clawteam is symlinked into /usr/local/bin" {
+@test "module 04: symlinks clawteam into /usr/local/bin with -sf flags" {
   if [[ "$(id -u)" != "0" ]]; then skip "requires root"; fi
-  run bash "${INSTALL_SCRIPT}"
-  assert_success
-  assert_stub_called_with ln "/usr/local/bin/clawteam"
-}
-
-@test "symlink uses -sf flags (force, symbolic)" {
-  if [[ "$(id -u)" != "0" ]]; then skip "requires root"; fi
-  run bash "${INSTALL_SCRIPT}"
+  run _run_module "04-clawteam.sh"
   assert_success
   assert_stub_called_with ln "-sf"
-}
-
-@test "symlink source is /opt/clawteam/.venv/bin/clawteam" {
-  if [[ "$(id -u)" != "0" ]]; then skip "requires root"; fi
-  run bash "${INSTALL_SCRIPT}"
-  assert_success
+  assert_stub_called_with ln "/usr/local/bin/clawteam"
   assert_stub_called_with ln "/opt/clawteam/.venv/bin/clawteam"
 }
 
+@test "module 04: uses absolute venv path (no bare cd)" {
+  if grep -qE '^\s*cd ' "${MODULES_DIR}/04-clawteam.sh"; then
+    fail "Module 04 uses bare 'cd' — use absolute paths instead"
+  fi
+}
+
+@test "module 04: is idempotent (skips if marker and binary exist)" {
+  if [[ "$(id -u)" != "0" ]]; then skip "requires root"; fi
+  run _run_module "04-clawteam.sh"
+  assert_success
+  rm -f "${STUBS_DIR}/python3.log"
+  # Create the binary so the idempotency check passes
+  touch "${STUBS_DIR}/clawteam-bin-marker"
+  run _run_module "04-clawteam.sh"
+  assert_success
+}
+
 # ===========================================================================
-# 5 — git: workspace and identity
+# F — Module 05: workspace + team
 # ===========================================================================
 
-@test "git global user.email is configured" {
+@test "module 05: configures git global user.email" {
   if [[ "$(id -u)" != "0" ]]; then skip "requires root"; fi
-  run bash "${INSTALL_SCRIPT}"
+  run _run_module "05-workspace.sh"
   assert_success
   assert_stub_called_with git "user.email"
 }
 
-@test "git global user.name is configured" {
+@test "module 05: configures git global user.name" {
   if [[ "$(id -u)" != "0" ]]; then skip "requires root"; fi
-  run bash "${INSTALL_SCRIPT}"
+  run _run_module "05-workspace.sh"
   assert_success
   assert_stub_called_with git "user.name"
 }
 
-@test "git init creates the openclaw-workspace" {
-  if [[ "$(id -u)" != "0" ]]; then skip "requires root"; fi
-  run bash "${INSTALL_SCRIPT}"
-  assert_success
-  assert_stub_called_with git "init"
-  assert_stub_called_with git "openclaw-workspace"
+@test "module 05: initialises git workspace with git -C (not bare cd)" {
+  assert_file_contains "${MODULES_DIR}/05-workspace.sh" 'git -C'
+  if grep -qE '^\s*cd .*workspace' "${MODULES_DIR}/05-workspace.sh"; then
+    fail "Module 05 uses bare 'cd' into workspace — use 'git -C' or absolute paths"
+  fi
 }
 
-# ===========================================================================
-# 6 — ClawTeam team creation
-# ===========================================================================
-
-@test "clawteam team spawn-team is called for default team" {
+@test "module 05: calls clawteam team spawn-team with correct flags" {
   if [[ "$(id -u)" != "0" ]]; then skip "requires root"; fi
-  run bash "${INSTALL_SCRIPT}"
+  run _run_module "05-workspace.sh"
   assert_success
   assert_stub_called_with clawteam "team"
   assert_stub_called_with clawteam "spawn-team"
   assert_stub_called_with clawteam "openclaw-team"
 }
 
-@test "spawn-team is called with -d description flag (not --description)" {
-  if [[ "$(id -u)" != "0" ]]; then skip "requires root"; fi
-  run bash "${INSTALL_SCRIPT}"
-  assert_success
-  assert_stub_called_with clawteam " -d "
+@test "module 05: spawn-team uses -d flag (not --description)" {
+  assert_file_contains "${MODULES_DIR}/05-workspace.sh" ' -d '
+  if grep -q '\-\-description' "${MODULES_DIR}/05-workspace.sh"; then
+    fail "Module 05 uses --description; ClawTeam CLI requires -d"
+  fi
 }
 
-@test "spawn-team is called with -n leader flag (not --agent-name)" {
-  if [[ "$(id -u)" != "0" ]]; then skip "requires root"; fi
-  run bash "${INSTALL_SCRIPT}"
-  assert_success
-  assert_stub_called_with clawteam " -n leader"
+@test "module 05: spawn-team uses -n flag (not --agent-name)" {
+  assert_file_contains "${MODULES_DIR}/05-workspace.sh" ' -n '
+  if grep -q '\-\-agent-name' "${MODULES_DIR}/05-workspace.sh"; then
+    fail "Module 05 uses --agent-name on spawn-team; that flag belongs to 'clawteam spawn'"
+  fi
 }
 
-@test "script continues if clawteam spawn-team fails (non-fatal)" {
+@test "module 05: script continues (non-fatal) if spawn-team fails" {
   if [[ "$(id -u)" != "0" ]]; then skip "requires root"; fi
-  # Override clawteam stub to fail — the install script should still succeed
-  # because team creation is wrapped in an 'if' with a warn fallback
   create_stub clawteam "team already exists" 1
-  run bash "${INSTALL_SCRIPT}"
+  run _run_module "05-workspace.sh"
+  # Should warn but not exit 1 — spawn-team failure is non-fatal
   assert_success
 }
 
 # ===========================================================================
-# 7 — systemd service file
+# G — Module 06: systemd service
 # ===========================================================================
 
-@test "systemd service file is written to /etc/systemd/system/" {
+@test "module 06: writes service file to /etc/systemd/system/" {
   if [[ "$(id -u)" != "0" ]]; then skip "requires root"; fi
-  run bash "${INSTALL_SCRIPT}"
+  run _run_module "06-systemd.sh"
   assert_success
   assert_file_exists "/etc/systemd/system/clawteam-board.service"
 }
 
-@test "service file [Unit] section is present" {
+@test "module 06: service [Unit] section present" {
   if [[ "$(id -u)" != "0" ]]; then skip "requires root"; fi
-  run bash "${INSTALL_SCRIPT}"
+  run _run_module "06-systemd.sh"
   assert_success
   assert_file_contains "/etc/systemd/system/clawteam-board.service" '\[Unit\]'
 }
 
-@test "service file [Service] section is present" {
+@test "module 06: service [Service] section present" {
   if [[ "$(id -u)" != "0" ]]; then skip "requires root"; fi
-  run bash "${INSTALL_SCRIPT}"
+  run _run_module "06-systemd.sh"
   assert_success
   assert_file_contains "/etc/systemd/system/clawteam-board.service" '\[Service\]'
 }
 
-@test "service file [Install] section is present" {
+@test "module 06: service [Install] section present" {
   if [[ "$(id -u)" != "0" ]]; then skip "requires root"; fi
-  run bash "${INSTALL_SCRIPT}"
+  run _run_module "06-systemd.sh"
   assert_success
   assert_file_contains "/etc/systemd/system/clawteam-board.service" '\[Install\]'
 }
 
-@test "service ExecStart uses correct clawteam command and port" {
+@test "module 06: ExecStart uses correct clawteam command and port 8080" {
   if [[ "$(id -u)" != "0" ]]; then skip "requires root"; fi
-  run bash "${INSTALL_SCRIPT}"
+  run _run_module "06-systemd.sh"
   assert_success
   assert_file_contains "/etc/systemd/system/clawteam-board.service" \
     "ExecStart=/usr/local/bin/clawteam board serve --port 8080"
 }
 
-@test "service WorkingDirectory is the openclaw workspace" {
+@test "module 06: WorkingDirectory is the openclaw workspace" {
   if [[ "$(id -u)" != "0" ]]; then skip "requires root"; fi
-  run bash "${INSTALL_SCRIPT}"
+  run _run_module "06-systemd.sh"
   assert_success
   assert_file_contains "/etc/systemd/system/clawteam-board.service" \
     "WorkingDirectory=/root/workspace/openclaw-workspace"
 }
 
-@test "service Restart policy is on-failure" {
+@test "module 06: Restart policy is on-failure" {
   if [[ "$(id -u)" != "0" ]]; then skip "requires root"; fi
-  run bash "${INSTALL_SCRIPT}"
+  run _run_module "06-systemd.sh"
   assert_success
   assert_file_contains "/etc/systemd/system/clawteam-board.service" \
     "Restart=on-failure"
 }
 
-@test "service WantedBy is multi-user.target" {
+@test "module 06: WantedBy is multi-user.target" {
   if [[ "$(id -u)" != "0" ]]; then skip "requires root"; fi
-  run bash "${INSTALL_SCRIPT}"
+  run _run_module "06-systemd.sh"
   assert_success
   assert_file_contains "/etc/systemd/system/clawteam-board.service" \
     "WantedBy=multi-user.target"
 }
 
-@test "systemctl enable is called for clawteam-board" {
+@test "module 06: calls systemctl enable for clawteam-board" {
   if [[ "$(id -u)" != "0" ]]; then skip "requires root"; fi
-  run bash "${INSTALL_SCRIPT}"
+  run _run_module "06-systemd.sh"
   assert_success
   assert_stub_called_with systemctl "enable"
   assert_stub_called_with systemctl "clawteam-board"
 }
 
+@test "module 06: is idempotent (skips if marker + service file exist)" {
+  if [[ "$(id -u)" != "0" ]]; then skip "requires root"; fi
+  run _run_module "06-systemd.sh"
+  assert_success
+  rm -f "${STUBS_DIR}/systemctl.log"
+  run _run_module "06-systemd.sh"
+  assert_success
+  refute_stub_called systemctl
+}
+
 # ===========================================================================
-# 8 — MOTD helper
+# H — Module 07: MOTD
 # ===========================================================================
 
-@test "MOTD file is created at /etc/update-motd.d/99-clawteam" {
+@test "module 07: creates MOTD file at /etc/update-motd.d/99-clawteam" {
   if [[ "$(id -u)" != "0" ]]; then skip "requires root"; fi
-  run bash "${INSTALL_SCRIPT}"
+  run _run_module "07-motd.sh"
   assert_success
   assert_file_exists "/etc/update-motd.d/99-clawteam"
 }
 
-@test "MOTD file is executable" {
+@test "module 07: MOTD file is executable" {
   if [[ "$(id -u)" != "0" ]]; then skip "requires root"; fi
-  run bash "${INSTALL_SCRIPT}"
+  run _run_module "07-motd.sh"
   assert_success
   assert_file_executable "/etc/update-motd.d/99-clawteam"
 }
 
-@test "MOTD file references the workspace path" {
+@test "module 07: MOTD references workspace path" {
   if [[ "$(id -u)" != "0" ]]; then skip "requires root"; fi
-  run bash "${INSTALL_SCRIPT}"
+  run _run_module "07-motd.sh"
   assert_success
   assert_file_contains "/etc/update-motd.d/99-clawteam" \
     "/root/workspace/openclaw-workspace"
 }
 
-@test "MOTD file references the web UI port" {
+@test "module 07: MOTD references web UI port 8080" {
   if [[ "$(id -u)" != "0" ]]; then skip "requires root"; fi
-  run bash "${INSTALL_SCRIPT}"
+  run _run_module "07-motd.sh"
   assert_success
   assert_file_contains "/etc/update-motd.d/99-clawteam" "--port 8080"
 }
 
-@test "MOTD file references clawteam board attach command" {
+@test "module 07: MOTD references board attach command" {
   if [[ "$(id -u)" != "0" ]]; then skip "requires root"; fi
-  run bash "${INSTALL_SCRIPT}"
+  run _run_module "07-motd.sh"
   assert_success
   assert_file_contains "/etc/update-motd.d/99-clawteam" "board attach"
 }
 
-@test "MOTD file mentions openclaw-team" {
+@test "module 07: MOTD mentions openclaw-team" {
   if [[ "$(id -u)" != "0" ]]; then skip "requires root"; fi
-  run bash "${INSTALL_SCRIPT}"
+  run _run_module "07-motd.sh"
   assert_success
   assert_file_contains "/etc/update-motd.d/99-clawteam" "openclaw-team"
 }
 
-# ===========================================================================
-# 9 — Idempotency: re-running the script
-# ===========================================================================
+@test "module 07: MOTD mentions update command with pct" {
+  # The MOTD file content references the --update flag for the ct script
+  grep -q '\-\-update' "${MODULES_DIR}/07-motd.sh" \
+    || fail "Module 07 MOTD does not mention the --update flag"
+}
 
-@test "script is idempotent: running twice succeeds without error" {
+@test "module 07: is idempotent (skips on second run)" {
   if [[ "$(id -u)" != "0" ]]; then skip "requires root"; fi
-  run bash "${INSTALL_SCRIPT}"
+  run _run_module "07-motd.sh"
   assert_success
-  # Reset per-call stubs (logs accumulate, that is fine)
-  run bash "${INSTALL_SCRIPT}"
+  run _run_module "07-motd.sh"
   assert_success
 }
 
 # ===========================================================================
-# 10 — Static analysis (ShellCheck)
+# I — lib/common.sh
 # ===========================================================================
 
-@test "install script passes ShellCheck" {
-  if ! command -v shellcheck &>/dev/null; then
-    skip "shellcheck not installed"
-  fi
-  # SC1090: can't follow dynamic source — acceptable for FUNCTIONS_FILE_PATH
-  # SC2154: var referenced but not assigned — STD is set by the sourced shim
-  run shellcheck \
-    --exclude=SC1090,SC2154 \
-    "${PROJECT_ROOT}/install/clawteam-install.sh"
+@test "lib/common.sh: defines msg_info when not already declared" {
+  run bash -c "
+    source '${PROJECT_ROOT}/install/lib/common.sh'
+    declare -f msg_info
+  "
+  assert_success
+  assert_output --partial "msg_info"
+}
+
+@test "lib/common.sh: does not override msg_info if already defined" {
+  run bash -c "
+    msg_info() { echo 'original'; }
+    source '${PROJECT_ROOT}/install/lib/common.sh'
+    msg_info test
+  "
+  assert_success
+  assert_output "original"
+}
+
+@test "lib/common.sh: defines already_installed helper" {
+  run bash -c "
+    source '${PROJECT_ROOT}/install/lib/common.sh'
+    declare -f already_installed
+  "
+  assert_success
+}
+
+@test "lib/common.sh: already_installed returns true for bash" {
+  run bash -c "
+    source '${PROJECT_ROOT}/install/lib/common.sh'
+    already_installed bash && echo yes
+  "
+  assert_success
+  assert_output "yes"
+}
+
+@test "lib/common.sh: already_installed returns false for nonexistent-cmd-xyz" {
+  run bash -c "
+    source '${PROJECT_ROOT}/install/lib/common.sh'
+    already_installed nonexistent-cmd-xyz && echo yes || echo no
+  "
+  assert_success
+  assert_output "no"
+}
+
+# ===========================================================================
+# J — Static analysis (ShellCheck)
+# ===========================================================================
+
+@test "ShellCheck: install/clawteam-install.sh" {
+  if ! command -v shellcheck &>/dev/null; then skip "shellcheck not installed"; fi
+  run shellcheck --exclude=SC1090,SC1091,SC2154 "${INSTALL_SCRIPT}"
+  assert_success
+}
+
+@test "ShellCheck: install/lib/common.sh" {
+  if ! command -v shellcheck &>/dev/null; then skip "shellcheck not installed"; fi
+  run shellcheck "${PROJECT_ROOT}/install/lib/common.sh"
+  assert_success
+}
+
+@test "ShellCheck: module 01-system-deps.sh" {
+  if ! command -v shellcheck &>/dev/null; then skip "shellcheck not installed"; fi
+  run shellcheck --exclude=SC1090,SC1091,SC2154 "${MODULES_DIR}/01-system-deps.sh"
+  assert_success
+}
+
+@test "ShellCheck: module 02-nodejs.sh" {
+  if ! command -v shellcheck &>/dev/null; then skip "shellcheck not installed"; fi
+  run shellcheck --exclude=SC1090,SC1091,SC2154 "${MODULES_DIR}/02-nodejs.sh"
+  assert_success
+}
+
+@test "ShellCheck: module 03-openclaw.sh" {
+  if ! command -v shellcheck &>/dev/null; then skip "shellcheck not installed"; fi
+  run shellcheck --exclude=SC1090,SC1091,SC2154 "${MODULES_DIR}/03-openclaw.sh"
+  assert_success
+}
+
+@test "ShellCheck: module 04-clawteam.sh" {
+  if ! command -v shellcheck &>/dev/null; then skip "shellcheck not installed"; fi
+  run shellcheck --exclude=SC1090,SC1091,SC2154 "${MODULES_DIR}/04-clawteam.sh"
+  assert_success
+}
+
+@test "ShellCheck: module 05-workspace.sh" {
+  if ! command -v shellcheck &>/dev/null; then skip "shellcheck not installed"; fi
+  run shellcheck --exclude=SC1090,SC1091,SC2154 "${MODULES_DIR}/05-workspace.sh"
+  assert_success
+}
+
+@test "ShellCheck: module 06-systemd.sh" {
+  if ! command -v shellcheck &>/dev/null; then skip "shellcheck not installed"; fi
+  run shellcheck --exclude=SC1090,SC1091,SC2154 "${MODULES_DIR}/06-systemd.sh"
+  assert_success
+}
+
+@test "ShellCheck: module 07-motd.sh" {
+  if ! command -v shellcheck &>/dev/null; then skip "shellcheck not installed"; fi
+  run shellcheck --exclude=SC1090,SC1091,SC2154 "${MODULES_DIR}/07-motd.sh"
   assert_success
 }

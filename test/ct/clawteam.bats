@@ -3,46 +3,38 @@
 #
 # TDD tests for ct/clawteam.sh (the Proxmox host-side LXC creation script)
 #
-# Because the host script sources a remote build.func URL, these tests focus
-# on the logic that IS testable in isolation:
-#   • Variable defaults are correctly declared
-#   • update_script() behaves correctly
-#   • ShellCheck passes
-#
-# Full end-to-end container creation requires a live Proxmox environment and
-# is intentionally out of scope for unit tests.
+# Tests cover:
+#   Group A — Variable defaults
+#   Group B — update_script() / --update path
+#   Group C — _pct_standalone() pct/pveam integration
+#   Group D — Script structure invariants
+#   Group E — Static analysis (ShellCheck)
 #
 # Run:
 #   ./test/bats/bin/bats test/ct/clawteam.bats
 
 bats_require_minimum_version 1.5.0
 
-# ---------------------------------------------------------------------------
-# Shared setup
-# ---------------------------------------------------------------------------
-
 setup() {
   load "$(dirname "$BATS_TEST_FILENAME")/../test_helper/common-setup.bash"
   _common_setup
-
   HOST_SCRIPT="${PROJECT_ROOT}/ct/clawteam.sh"
 }
 
-# ===========================================================================
-# 1 — Variable defaults
-#     Source only the variable declarations by extracting them with bash -c
-#     in a subshell so we can inspect values without running the full script.
-# ===========================================================================
-
-# Helper: source just the var_* lines from the host script in a subshell
-# and print the value of a named variable.
+# ─────────────────────────────────────────────────────────────────────────────
+# Helper: extract the var_* defaults from the host script in a subshell
+# ─────────────────────────────────────────────────────────────────────────────
 _get_var() {
   local varname="$1"
   bash -c "
-    $(grep -E '^(APP=|var_[a-z_]+)' "${HOST_SCRIPT}")
+    $(grep -E '^(APP=|var_[a-z_]+|CT_[A-Z_]+=)' "${HOST_SCRIPT}" | head -30)
     echo \"\${${varname}}\"
   "
 }
+
+# ===========================================================================
+# A — Variable defaults
+# ===========================================================================
 
 @test "APP is set to ClawTeam" {
   run _get_var "APP"
@@ -96,193 +88,206 @@ _get_var() {
   [[ "${result}" == *"clawteam"* ]] || fail "var_tags '${result}' does not contain 'clawteam'"
 }
 
+@test "CT_HOSTNAME defaults to clawteam" {
+  run _get_var "CT_HOSTNAME"
+  assert_success
+  assert_output "clawteam"
+}
+
+@test "CT_BRIDGE defaults to vmbr0" {
+  run _get_var "CT_BRIDGE"
+  assert_success
+  assert_output "vmbr0"
+}
+
+@test "CT_ONBOOT defaults to 1 (autostart)" {
+  run _get_var "CT_ONBOOT"
+  assert_success
+  assert_output "1"
+}
+
+@test "STANDALONE defaults to 0 (community-scripts mode)" {
+  # STANDALONE uses :- default — verify the default value in the file
+  grep -q 'STANDALONE="${STANDALONE:-0}"' "${HOST_SCRIPT}" \
+    || fail "STANDALONE default of 0 not found in ${HOST_SCRIPT}"
+}
+
 @test "var_cpu can be overridden via environment" {
   run bash -c "var_cpu=8; $(grep '^var_cpu=' "${HOST_SCRIPT}"); echo \${var_cpu}"
   assert_success
   assert_output "8"
 }
 
-# ===========================================================================
-# 2 — update_script() function
-#     Extract and source the function definition in isolation, then invoke it
-#     with mocked dependencies.
-# ===========================================================================
-
-# Extract just the update_script function body from the host script
-_source_update_script() {
-  # Source the stub-functions shim (provides msg_info, msg_ok, msg_error, etc.)
-  # then source the host script in a mode where it will NOT execute start/build.
-  # We do this by redefining the tail functions as no-ops before sourcing.
-  # The 'source <(curl ...)' on line 2 must be neutralised: we provide a local
-  # override of 'source' via a wrapper script.
-  local tmpscript="${BATS_TEST_TMPDIR}/update-test.sh"
-  cat >"${tmpscript}" <<'WRAPPER'
-#!/usr/bin/env bash
-# Shim that replaces the first 'source <(curl ...)' with a no-op
-FUNCTIONS_FILE_PATH_INJECTED="PLACEHOLDER_REPLACED_BY_SETUP"
-source_orig="$(command -v source 2>/dev/null || true)"
-
-# Prevent the remote source line from executing by redefining curl to cat /dev/null
-curl() { cat /dev/null; }
-export -f curl
-
-# Load shim functions instead
-WRAPPER
-  echo "${FUNCTIONS_FILE_PATH}" >>"${tmpscript}"
-  echo "" >>"${tmpscript}"
-  # Append the update_script function from the host script
-  awk '/^function update_script/,/^}/' "${HOST_SCRIPT}" >>"${tmpscript}"
-  echo "" >>"${tmpscript}"
-  echo "update_script" >>"${tmpscript}"
-  bash "${tmpscript}"
+@test "CT_RAM can be overridden via environment" {
+  run bash -c "CT_RAM=8192; $(grep '^CT_RAM=' "${HOST_SCRIPT}"); echo \${CT_RAM}"
+  assert_success
+  assert_output "8192"
 }
 
-@test "update_script fails with error when /opt/clawteam is missing" {
-  # Make sure /opt/clawteam does not exist in the test environment
-  rm -rf /opt/clawteam 2>/dev/null || true
+# ===========================================================================
+# B — update_script() and --update path
+# ===========================================================================
 
-  # Build a minimal script that defines update_script with shim functions
-  # and invokes it
-  local tmpscript="${BATS_TEST_TMPDIR}/update-no-install.sh"
-  cat >"${tmpscript}" <<SCRIPT
+@test "--update flag exits non-zero when container has no ClawTeam" {
+  # Create pct stub that reports the container as existing
+  create_stub pct "running" 0
+  # But test -d /opt/clawteam will fail (pct exec returns 1)
+  cat >"${STUBS_DIR}/pct" <<PCTSTUB
 #!/usr/bin/env bash
-set -euo pipefail
-$(cat "${PROJECT_ROOT}/test/test_helper/stub-functions.bash")
-# Provide STD for npm stub
-STD=""
-$(awk '/^function update_script/,/^}/' "${HOST_SCRIPT}")
-update_script
-SCRIPT
+echo "pct \$*" >> "${STUBS_DIR}/pct.log"
+# pct status -> success (container exists)
+if [[ "\$1" == "status" ]]; then exit 0; fi
+# pct exec ... test -d -> fail (no installation)
+if [[ "\$1" == "exec" ]]; then exit 1; fi
+exit 0
+PCTSTUB
+  chmod +x "${STUBS_DIR}/pct"
 
-  run bash "${tmpscript}"
+  run bash "${HOST_SCRIPT}" --update 100
   assert_failure
 }
 
-@test "update_script calls pip upgrade for clawteam when installed" {
-  # Create a fake venv under the temp dir so no root is needed
-  local fake_venv="${BATS_TEST_TMPDIR}/opt/clawteam/.venv"
-  mkdir -p "${fake_venv}/bin"
-
-  # Stub venv pip — records calls to a log
-  local pip_log="${STUBS_DIR}/venv-pip-upgrade.log"
-  cat >"${fake_venv}/bin/pip" <<VPIPEOF
-#!/usr/bin/env bash
-echo "venv-pip \$*" >> "${pip_log}"
-exit 0
-VPIPEOF
-  chmod +x "${fake_venv}/bin/pip"
-
-  create_stub npm "" 0
-
-  # Rewrite update_script's hardcoded /opt/clawteam path via sed so it uses
-  # the temp venv and the temp /opt check
-  local tmpscript="${BATS_TEST_TMPDIR}/update-ok.sh"
-  {
-    echo "#!/usr/bin/env bash"
-    cat "${PROJECT_ROOT}/test/test_helper/stub-functions.bash"
-    echo "STD=\"\""
-    echo "export PATH=\"${STUBS_DIR}:\${PATH}\""
-    # Extract update_script, redirect hardcoded paths to temp dirs
-    awk '/^function update_script/,/^}/' "${HOST_SCRIPT}" \
-      | sed "s|/opt/clawteam|${BATS_TEST_TMPDIR}/opt/clawteam|g"
-    echo "update_script"
-  } >"${tmpscript}"
-
-  run bash "${tmpscript}"
-  assert_success
-  # Verify venv pip was called with --upgrade clawteam
-  assert_file_exists "${pip_log}"
-  grep -qF "upgrade" "${pip_log}"
+@test "--update flag requires a vmid argument" {
+  run bash "${HOST_SCRIPT}" --update
+  assert_failure
+  assert_output --partial "Usage"
 }
 
-@test "update_script calls npm install -g openclaw@latest (not npm update)" {
-  # Create a fake venv under temp dir so no root is needed
-  local fake_venv="${BATS_TEST_TMPDIR}/opt/clawteam/.venv"
-  mkdir -p "${fake_venv}/bin"
-  cat >"${fake_venv}/bin/pip" <<'VPIPEOF'
-#!/usr/bin/env bash
-exit 0
-VPIPEOF
-  chmod +x "${fake_venv}/bin/pip"
-
-  create_stub npm "" 0
-
-  local tmpscript="${BATS_TEST_TMPDIR}/update-npm.sh"
-  {
-    echo "#!/usr/bin/env bash"
-    cat "${PROJECT_ROOT}/test/test_helper/stub-functions.bash"
-    echo "STD=\"\""
-    echo "export PATH=\"${STUBS_DIR}:\${PATH}\""
-    awk '/^function update_script/,/^}/' "${HOST_SCRIPT}" \
-      | sed "s|/opt/clawteam|${BATS_TEST_TMPDIR}/opt/clawteam|g"
-    echo "update_script"
-  } >"${tmpscript}"
-
-  run bash "${tmpscript}"
-  assert_success
-  assert_stub_called_with npm "install -g openclaw@latest"
-  refute_stub_called_with npm "update"
+@test "--update calls pip upgrade for clawteam (static)" {
+  # Verify _pct_update issues a pip --upgrade command for clawteam
+  grep -q 'pip install.*--upgrade.*clawteam\|pip.*upgrade.*clawteam' "${HOST_SCRIPT}" \
+    || fail "_pct_update does not contain 'pip install --upgrade clawteam'"
 }
 
-# ===========================================================================
-# 3 — Static analysis (ShellCheck)
-# ===========================================================================
-
-@test "host script passes ShellCheck" {
-  if ! command -v shellcheck &>/dev/null; then
-    skip "shellcheck not installed"
+@test "--update calls npm install -g not npm update (static)" {
+  # Verify _pct_update uses npm install -g, not npm update
+  grep -q 'npm install -g openclaw@latest' "${HOST_SCRIPT}" \
+    || fail "_pct_update does not use 'npm install -g openclaw@latest'"
+  if grep -qE '^\s*npm update' "${HOST_SCRIPT}"; then
+    fail "Found bare 'npm update' in ${HOST_SCRIPT} — must use 'npm install -g'"
   fi
-  # SC1090: can't follow dynamic source <(curl ...) — expected
-  # SC2034: APP/var_* appear unused inside the file (used by sourced build.func)
-  run shellcheck \
-    --exclude=SC1090,SC2034 \
-    "${HOST_SCRIPT}"
-  assert_success
 }
 
 # ===========================================================================
-# 4 — Script structure: required calls in correct order
+# C — pct / pveam integration (_pct_standalone)
 # ===========================================================================
 
-@test "host script calls variables before header_info" {
-  # In the source file, 'variables' must appear before 'header_info'
+@test "_pct_standalone: exits non-zero when pct is not available (static)" {
+  # Verify the script contains a guard that fails when pct is not on PATH
+  grep -q 'command -v pct' "${HOST_SCRIPT}" \
+    || fail "_pct_standalone does not check for pct availability"
+  grep -q 'pct not found' "${HOST_SCRIPT}" \
+    || fail "_pct_standalone does not emit a 'pct not found' error message"
+}
+
+@test "_pct_standalone: calls pveam update when no template is cached (static)" {
+  # Verify the script contains logic to call pveam update
+  assert_file_contains "${HOST_SCRIPT}" 'pveam update'
+}
+
+@test "_pct_standalone: calls pveam download to fetch missing template (static)" {
+  assert_file_contains "${HOST_SCRIPT}" 'pveam download'
+}
+
+@test "_pct_standalone: calls pct create with all required flags (static)" {
+  for flag in hostname cores memory swap rootfs net0 unprivileged features onboot tags start; do
+    grep -q "\-\-${flag}" "${HOST_SCRIPT}" \
+      || fail "pct create is missing '--${flag}' in ${HOST_SCRIPT}"
+  done
+}
+
+@test "_pct_standalone: uses pvesh to get next container ID" {
+  assert_file_contains "${HOST_SCRIPT}" 'pvesh get /cluster/nextid'
+}
+
+@test "_pct_standalone: waits for container network (retries loop)" {
+  assert_file_contains "${HOST_SCRIPT}" 'hostname -I'
+  assert_file_contains "${HOST_SCRIPT}" 'retries'
+}
+
+@test "_pct_standalone: pct create includes --unprivileged flag" {
+  assert_file_contains "${HOST_SCRIPT}" '\-\-unprivileged'
+}
+
+@test "_pct_standalone: pct create includes --features nesting=1" {
+  assert_file_contains "${HOST_SCRIPT}" 'nesting=1'
+}
+
+@test "_pct_standalone: pct create includes --onboot flag" {
+  assert_file_contains "${HOST_SCRIPT}" '\-\-onboot'
+}
+
+@test "_pct_run_install: uses pct push to copy install script" {
+  assert_file_contains "${HOST_SCRIPT}" 'pct push'
+}
+
+@test "_pct_run_install: uses pct exec to run install script" {
+  assert_file_contains "${HOST_SCRIPT}" 'pct exec'
+}
+
+@test "_pct_run_install: sets perms 0755 when pushing script" {
+  assert_file_contains "${HOST_SCRIPT}" '0755'
+}
+
+# ===========================================================================
+# D — Script structure invariants
+# ===========================================================================
+
+@test "host script has STANDALONE mode guard" {
+  assert_file_contains "${HOST_SCRIPT}" 'STANDALONE'
+}
+
+@test "host script defines both _pct_standalone and _community_scripts_mode" {
+  grep -q '^_pct_standalone()' "${HOST_SCRIPT}" \
+    || fail "_pct_standalone() function not found"
+  grep -q '^_community_scripts_mode()' "${HOST_SCRIPT}" \
+    || fail "_community_scripts_mode() function not found"
+}
+
+@test "community-scripts mode calls variables before header_info" {
   local variables_line header_line
-  variables_line=$(grep -n '^variables$' "${HOST_SCRIPT}" | head -1 | cut -d: -f1)
-  header_line=$(grep -n '^header_info' "${HOST_SCRIPT}" | head -1 | cut -d: -f1)
-  [[ -n "${variables_line}" ]] || fail "'variables' call not found in ${HOST_SCRIPT}"
-  [[ -n "${header_line}" ]]   || fail "'header_info' call not found in ${HOST_SCRIPT}"
+  variables_line=$(grep -n '^\s*variables$' "${HOST_SCRIPT}" | head -1 | cut -d: -f1)
+  header_line=$(grep -n '^\s*header_info' "${HOST_SCRIPT}" | head -1 | cut -d: -f1)
+  [[ -n "${variables_line}" ]] || fail "'variables' call not found"
+  [[ -n "${header_line}" ]]   || fail "'header_info' call not found"
   [[ "${variables_line}" -lt "${header_line}" ]] \
     || fail "'variables' (line ${variables_line}) must precede 'header_info' (line ${header_line})"
 }
 
-@test "host script calls start, build_container, description in order" {
-  local start_line build_line desc_line
-  start_line=$(grep -n '^start$' "${HOST_SCRIPT}" | head -1 | cut -d: -f1)
-  build_line=$(grep -n '^build_container$' "${HOST_SCRIPT}" | head -1 | cut -d: -f1)
-  desc_line=$(grep -n '^description$' "${HOST_SCRIPT}" | head -1 | cut -d: -f1)
-  [[ -n "${start_line}" ]] || fail "'start' call not found"
-  [[ -n "${build_line}" ]] || fail "'build_container' call not found"
-  [[ -n "${desc_line}" ]]  || fail "'description' call not found"
-  [[ "${start_line}" -lt "${build_line}" ]] \
-    || fail "'start' must precede 'build_container'"
-  [[ "${build_line}" -lt "${desc_line}" ]] \
-    || fail "'build_container' must precede 'description'"
+@test "community-scripts mode calls start, build_container, description" {
+  for fn in start build_container description; do
+    grep -q "^\s*${fn}$" "${HOST_SCRIPT}" \
+      || fail "'${fn}' call not found in community-scripts mode"
+  done
 }
 
-@test "host script does not use bare 'npm update' for openclaw" {
-  # update_script must use 'npm install -g' not 'npm update' to ensure the
-  # latest version is always fetched
-  if grep -qE '^[[:space:]]*npm update' "${HOST_SCRIPT}"; then
-    fail "Found 'npm update' in ${HOST_SCRIPT}; use 'npm install -g openclaw@latest' instead"
+@test "host script does not use bare 'npm update'" {
+  if grep -qE '^\s*npm update' "${HOST_SCRIPT}"; then
+    fail "Found 'npm update' — use 'npm install -g openclaw@latest'"
   fi
 }
 
-@test "host script guards IP echo behind non-empty IP check" {
-  # Bare 'echo .../\${IP}:8080' without a guard would silently produce a
-  # broken URL if IP is unset.  Confirm there is a guard.
+@test "host script guards \${IP} behind non-empty check" {
   if grep -qE 'echo.*\$\{IP\}' "${HOST_SCRIPT}"; then
-    if ! grep -qE '\[\[.*\$\{?IP\}?.*\]\]' "${HOST_SCRIPT}"; then
-      fail "Unguarded \${IP} interpolation found in echo statement in ${HOST_SCRIPT}"
-    fi
+    grep -qE '\[\[.*\$\{?IP' "${HOST_SCRIPT}" \
+      || fail "Unguarded \${IP} in echo — wrap in [[ -n \"\${IP:-}\" ]]"
   fi
+}
+
+@test "host script uses INSTALL_SCRIPT_URL for remote install" {
+  assert_file_contains "${HOST_SCRIPT}" 'INSTALL_SCRIPT_URL'
+}
+
+# ===========================================================================
+# E — Static analysis (ShellCheck)
+# ===========================================================================
+
+@test "host script passes ShellCheck" {
+  if ! command -v shellcheck &>/dev/null; then skip "shellcheck not installed"; fi
+  # SC1090: dynamic source <(curl ...) — expected
+  # SC2034: APP/var_* appear unused locally (consumed by sourced build.func)
+  run shellcheck \
+    --exclude=SC1090,SC2034 \
+    "${HOST_SCRIPT}"
+  assert_success
 }

@@ -25,9 +25,17 @@ jobs:
         run: shellcheck --exclude=SC1090,SC2034 ct/clawteam.sh
 
       - name: Lint install/clawteam-install.sh
-        # SC1090: dynamic source via FUNCTIONS_FILE_PATH — expected pattern
+        # SC1090/SC1091: dynamic source via FUNCTIONS_FILE_PATH / relative modules
         # SC2154: STD / msg_* set by the sourced shim at runtime
-        run: shellcheck --exclude=SC1090,SC2154 install/clawteam-install.sh
+        run: shellcheck --exclude=SC1090,SC1091,SC2154 install/clawteam-install.sh
+
+      - name: Lint install/lib/common.sh
+        run: shellcheck install/lib/common.sh
+
+      - name: Lint install/modules/*.sh
+        # SC1090/SC1091: dynamic source for common.sh (relative path)
+        # SC2154: STD / msg_* injected by common.sh at runtime
+        run: shellcheck --exclude=SC1090,SC1091,SC2154 install/modules/*.sh
 
   # ── BATS unit tests (host-script logic, no root required) ───────────────────
   bats-unit:
@@ -40,6 +48,9 @@ jobs:
 
       - name: Run ct/clawteam.bats
         run: ./test/bats/bin/bats --tap test/ct/clawteam.bats
+
+      - name: Run install/clawteam-install.bats (structural tests only)
+        run: ./test/bats/bin/bats --tap test/install/clawteam-install.bats
 
   # ── BATS integration tests (install script, requires root in a container) ───
   bats-integration:
@@ -61,7 +72,7 @@ jobs:
           apt-get install -y --no-install-recommends \
             curl git tmux python3 python3-pip python3-venv \
             build-essential libzmq3-dev nodejs npm \
-            shellcheck
+            shellcheck systemd
 
       - name: Run install script tests (root, Debian Trixie container)
         run: ./test/bats/bin/bats --tap test/install/clawteam-install.bats

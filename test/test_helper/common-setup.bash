@@ -82,3 +82,50 @@ refute_stub_called_with() {
     fail "Expected stub '${cmd}' NOT to be called with '${pattern}', but it was.\nActual calls:\n$(cat "${STUBS_DIR}/${cmd}.log")"
   fi
 }
+
+# ── Module test helpers ────────────────────────────────────────────────────────
+
+# _setup_module_env
+#   Sets up a minimal environment for testing individual install modules
+#   in isolation (without running the full orchestrator).
+#   Creates standard stubs for all external commands a module might call.
+_setup_module_env() {
+  _common_setup
+
+  # Fake marker directory so module_done / mark_done work without root
+  export CLAWTEAM_DONE_DIR="${BATS_TEST_TMPDIR}/done"
+  mkdir -p "${CLAWTEAM_DONE_DIR}"
+
+  # Override module_done and mark_done to use the temp dir
+  module_done() { [[ -f "${CLAWTEAM_DONE_DIR}/$1" ]]; }
+  mark_done()   { touch "${CLAWTEAM_DONE_DIR}/$1"; }
+  export -f module_done mark_done
+
+  # Source the stub-functions shim so msg_info/ok/warn/error are available
+  # shellcheck disable=SC1090
+  source "${PROJECT_ROOT}/test/test_helper/stub-functions.bash"
+}
+
+# _run_module_script MODULE_PATH
+#   Sources a module file in a subshell via `bash`, injecting all necessary
+#   environment overrides so it writes to BATS_TEST_TMPDIR instead of /.
+_run_module_script() {
+  local module_path="$1"
+  bash -c "
+    # Load stub helpers into the subprocess
+    source '${PROJECT_ROOT}/test/test_helper/stub-functions.bash'
+
+    # Override mark_done / module_done to use temp dir
+    CLAWTEAM_DONE_DIR='${BATS_TEST_TMPDIR}/done'
+    mkdir -p \"\${CLAWTEAM_DONE_DIR}\"
+    module_done() { [[ -f \"\${CLAWTEAM_DONE_DIR}/\$1\" ]]; }
+    mark_done()   { touch \"\${CLAWTEAM_DONE_DIR}/\$1\"; }
+    export -f module_done mark_done
+
+    # Prepend stub dir to PATH
+    export PATH='${STUBS_DIR}:\${PATH}'
+
+    # Run the module
+    source '${module_path}'
+  "
+}
