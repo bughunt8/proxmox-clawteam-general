@@ -19,7 +19,11 @@
 #   # Update an existing container (community-scripts re-run):
 #   bash -c "$(curl -fsSL .../ct/clawteam.sh)" -- --update <vmid>
 
-set -Eeuo pipefail
+# Note: do NOT set -u here — build.func's verb_ip6() references $SSH_CLIENT
+# which is unset in non-SSH environments; setting -u before sourcing build.func
+# causes a fatal "SSH_CLIENT: unbound variable" error.
+# In standalone mode _pct_standalone() sets its own error handling explicitly.
+set -Eeo pipefail
 
 # ── Application metadata ──────────────────────────────────────────────────────
 
@@ -79,6 +83,9 @@ _die()   { _error "$*"; exit 1; }
 # ─────────────────────────────────────────────────────────────────────────────
 
 _pct_standalone() {
+  # Standalone path owns its environment — enable full strict mode here
+  set -u
+
   # Verify we are running on a Proxmox VE host
   if ! command -v pct &>/dev/null; then
     _die "pct not found. This script must run on a Proxmox VE host."
