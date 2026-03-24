@@ -261,6 +261,26 @@ PCTSTUB
   done
 }
 
+@test "community-scripts mode calls _pct_run_install after build_container" {
+  # build_container fetches from community-scripts/ProxmoxVE — a URL that
+  # does not host our script. _pct_run_install must be called explicitly
+  # after build_container to push and run our install script.
+  local build_line install_line
+  build_line=$(grep -n '^\s*build_container$' "${HOST_SCRIPT}" | head -1 | cut -d: -f1)
+  install_line=$(grep -n '_pct_run_install' "${HOST_SCRIPT}" | tail -1 | cut -d: -f1)
+  [[ -n "${build_line}" ]]  || fail "build_container call not found"
+  [[ -n "${install_line}" ]] || fail "_pct_run_install call not found"
+  [[ "${install_line}" -gt "${build_line}" ]] \
+    || fail "_pct_run_install (line ${install_line}) must come AFTER build_container (line ${build_line})"
+}
+
+@test "community-scripts mode echo uses \${CTID} not literal string" {
+  # \${CTID} (with backslash) prints literally as '\${CTID}' — must be bare ${CTID}
+  if grep -qF '\${CTID}' "${HOST_SCRIPT}"; then
+    fail "Found literal '\\${CTID}' in ${HOST_SCRIPT} — remove the backslash so the variable expands"
+  fi
+}
+
 @test "host script does not use bare 'npm update'" {
   if grep -qE '^\s*npm update' "${HOST_SCRIPT}"; then
     fail "Found 'npm update' — use 'npm install -g openclaw@latest'"

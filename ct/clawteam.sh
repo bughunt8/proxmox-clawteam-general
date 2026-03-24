@@ -296,12 +296,22 @@ _community_scripts_mode() {
 
   start
   build_container
+
+  # build_container runs lxc-attach to fetch the install script from:
+  #   https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/install/clawteam-install.sh
+  # That URL does not exist — community-scripts only hosts scripts submitted
+  # to their own repo.  We therefore push and run OUR install script explicitly
+  # after build_container has set up the container and exported $CTID.
+  msg_info "Running ClawTeam install script inside container ${CTID}"
+  _pct_run_install "${CTID}"
+  msg_ok "ClawTeam install completed"
+
   description
 
   msg_ok "Completed Successfully!\n"
   echo -e "${CREATING}${GN}${APP} setup has been successfully initialized!${CL}"
   echo -e "${INFO}${YW} Enter the container:${CL}"
-  echo -e "${TAB}${GATEWAY}${BGN}pct enter \${CTID}${CL}"
+  echo -e "${TAB}${GATEWAY}${BGN}pct enter ${CTID}${CL}"
   echo -e "${INFO}${YW} Attach to swarm board inside the LXC:${CL}"
   echo -e "${TAB}${GATEWAY}${BGN}clawteam board attach openclaw-team${CL}"
   if [[ -n "${IP:-}" ]]; then
