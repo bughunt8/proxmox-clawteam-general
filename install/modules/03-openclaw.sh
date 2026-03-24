@@ -7,7 +7,7 @@
 #   bash install/modules/03-openclaw.sh
 
 set -Eeuo pipefail
-source "$(dirname "${BASH_SOURCE[-1]}")/../lib/common.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/../lib/common.sh"
 
 if module_done "03-openclaw"; then
   msg_ok "OpenClaw already installed — skipping."

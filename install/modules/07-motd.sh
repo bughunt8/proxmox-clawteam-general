@@ -7,7 +7,7 @@
 #   bash install/modules/07-motd.sh
 
 set -Eeuo pipefail
-source "$(dirname "${BASH_SOURCE[-1]}")/../lib/common.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/../lib/common.sh"
 
 MOTD_FILE="/etc/update-motd.d/99-clawteam"
 

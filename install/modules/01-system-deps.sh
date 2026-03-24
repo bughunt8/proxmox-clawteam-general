@@ -9,7 +9,7 @@
 # Sourced by install/clawteam-install.sh (community-scripts or standalone).
 
 set -Eeuo pipefail
-source "$(dirname "${BASH_SOURCE[-1]}")/../lib/common.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/../lib/common.sh"
 
 if module_done "01-system-deps"; then
   msg_ok "System dependencies already installed — skipping."

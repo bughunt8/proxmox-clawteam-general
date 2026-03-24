@@ -7,7 +7,7 @@
 #   bash install/modules/06-systemd.sh
 
 set -Eeuo pipefail
-source "$(dirname "${BASH_SOURCE[-1]}")/../lib/common.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/../lib/common.sh"
 
 SERVICE_FILE="/etc/systemd/system/clawteam-board.service"
 WORKSPACE_DIR="${WORKSPACE_ROOT:-/root/workspace/openclaw-workspace}"

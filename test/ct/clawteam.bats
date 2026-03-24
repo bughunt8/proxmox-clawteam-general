@@ -248,10 +248,16 @@ PCTSTUB
     || fail "Found community-scripts install URL outside patch/eval context:\n${bad_lines}"
 }
 
-@test "modules use BASH_SOURCE[-1] to locate common.sh (works when sourced)" {
+@test "modules use BASH_SOURCE[0] to locate common.sh" {
+  # BASH_SOURCE[0] is the currently-sourced file's path — correct in both
+  # standalone (bash module.sh) and sourced (_run_module inside orchestrator) contexts.
+  # BASH_SOURCE[-1] is the outermost caller (the orchestrator) — wrong when sourced.
   for mod in "${PROJECT_ROOT}/install/modules/"*.sh; do
-    grep -qF 'BASH_SOURCE[-1]' "${mod}" \
-      || fail "$(basename "${mod}") uses BASH_SOURCE[0] — must use BASH_SOURCE[-1] to resolve path correctly when sourced"
+    grep -qF 'BASH_SOURCE[0]' "${mod}" \
+      || fail "$(basename "${mod}") does not use BASH_SOURCE[0] for common.sh path"
+    if grep -qF 'BASH_SOURCE[-1]' "${mod}"; then
+      fail "$(basename "${mod}") uses BASH_SOURCE[-1] — must use BASH_SOURCE[0]"
+    fi
   done
 }
 

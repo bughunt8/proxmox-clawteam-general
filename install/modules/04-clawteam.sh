@@ -8,7 +8,7 @@
 #   bash install/modules/04-clawteam.sh
 
 set -Eeuo pipefail
-source "$(dirname "${BASH_SOURCE[-1]}")/../lib/common.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/../lib/common.sh"
 
 CLAWTEAM_VENV="${CLAWTEAM_VENV:-/opt/clawteam/.venv}"
 CLAWTEAM_BIN="/usr/local/bin/clawteam"
