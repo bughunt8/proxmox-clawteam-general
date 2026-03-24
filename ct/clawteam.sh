@@ -254,6 +254,13 @@ _print_summary() {
 # ─────────────────────────────────────────────────────────────────────────────
 
 _community_scripts_mode() {
+  # core.func's ssh_check() reads $SSH_CLIENT to detect SSH sessions.
+  # The silent()/$STD wrapper inside core.func restores set -Eeuo pipefail
+  # after every command, so $SSH_CLIENT must be bound before build.func is
+  # sourced — otherwise any code path that runs under set -u will fatal.
+  SSH_CLIENT="${SSH_CLIENT:-}"
+  export SSH_CLIENT
+
   # Source the community-scripts build framework
   # shellcheck disable=SC1090
   source <(curl -fsSL https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/misc/build.func)

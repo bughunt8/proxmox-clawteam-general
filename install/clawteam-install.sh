@@ -32,6 +32,10 @@ MODULES_DIR="${SCRIPT_DIR}/modules"
 # When injected by build.func, FUNCTIONS_FILE_PATH is set; source it.
 # In standalone mode the variable is empty and this block is skipped.
 if [[ -n "${FUNCTIONS_FILE_PATH:-}" ]]; then
+  # core.func's ssh_check() reads $SSH_CLIENT; the silent()/$STD wrapper
+  # restores set -Eeuo pipefail internally, so this must be bound first.
+  SSH_CLIENT="${SSH_CLIENT:-}"
+  export SSH_CLIENT
   # shellcheck disable=SC1090
   source /dev/stdin <<<"$FUNCTIONS_FILE_PATH"
   color
