@@ -216,6 +216,7 @@ _pct_run_install() {
       dl 'modules/05-workspace.sh'
       dl 'modules/06-systemd.sh'
       dl 'modules/07-motd.sh'
+      dl 'modules/08-nanobot.sh'
     "
   fi
 
@@ -249,6 +250,12 @@ _pct_update() {
   _info "Updating OpenClaw in container ${ctid}..."
   pct exec "${ctid}" -- npm install -g openclaw@latest
   _ok "Updated OpenClaw"
+
+  _info "Updating nanobot in container ${ctid}..."
+  pct exec "${ctid}" -- \
+    /opt/nanobot/.venv/bin/pip install --quiet --upgrade nanobot-ai \
+    || _warn "nanobot update skipped (not installed in /opt/nanobot/.venv)"
+  _ok "Updated nanobot"
 
   _ok "Container ${ctid} updated successfully."
 }
@@ -321,6 +328,14 @@ _community_scripts_mode() {
     # Use install -g (idempotent) not npm update
     $STD npm install -g openclaw@latest
     msg_ok "Updated OpenClaw"
+
+    msg_info "Updating nanobot"
+    if [[ -d /opt/nanobot/.venv ]]; then
+      /opt/nanobot/.venv/bin/pip install --quiet --upgrade nanobot-ai
+      msg_ok "Updated nanobot"
+    else
+      msg_warn "nanobot not found at /opt/nanobot/.venv — skipping"
+    fi
 
     msg_ok "Updated Successfully"
     exit 0

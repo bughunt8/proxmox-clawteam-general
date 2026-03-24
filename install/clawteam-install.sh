@@ -71,6 +71,7 @@ _run_module "01-system-deps.sh"
 _run_module "02-nodejs.sh"
 _run_module "03-openclaw.sh"
 _run_module "04-clawteam.sh"
+_run_module "08-nanobot.sh"      # default worker agent for clawteam spawn
 _run_module "05-workspace.sh"
 _run_module "06-systemd.sh"
 _run_module "07-motd.sh"

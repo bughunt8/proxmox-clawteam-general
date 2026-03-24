@@ -234,6 +234,7 @@ PCTSTUB
   assert_file_contains "${HOST_SCRIPT}" "lib/common.sh"
   assert_file_contains "${HOST_SCRIPT}" "modules/01-system-deps.sh"
   assert_file_contains "${HOST_SCRIPT}" "modules/07-motd.sh"
+  assert_file_contains "${HOST_SCRIPT}" "modules/08-nanobot.sh"
 }
 
 @test "_pct_run_install: uses REPO_RAW_URL for downloads (not hardcoded community-scripts URL)" {
@@ -307,6 +308,7 @@ PCTSTUB
   assert_file_contains "${bs}" 'lib/common.sh'
   assert_file_contains "${bs}" 'modules/01-system-deps.sh'
   assert_file_contains "${bs}" 'modules/07-motd.sh'
+  assert_file_contains "${bs}" 'modules/08-nanobot.sh'
   assert_file_contains "${bs}" 'clawteam-install.sh'
 }
 

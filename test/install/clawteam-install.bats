@@ -140,7 +140,7 @@ _run_module() {
 
 @test "orchestrator: all modules are sourced in numerical order" {
   # Verify the orchestrator sources each module in sequence
-  for m in 01 02 03 04 05 06 07; do
+  for m in 01 02 03 04 05 06 07 08; do
     grep -q "_run_module \"${m}-" "${INSTALL_SCRIPT}" \
       || fail "Module ${m} not sourced in ${INSTALL_SCRIPT}"
   done
@@ -527,6 +527,96 @@ _run_module() {
 }
 
 # ===========================================================================
+# H2 — Module 08: nanobot
+# ===========================================================================
+
+@test "module 08: file exists" {
+  assert_file_exists "${MODULES_DIR}/08-nanobot.sh"
+}
+
+@test "module 08: installs nanobot-ai (not nanobot) from PyPI" {
+  # PyPI package name is nanobot-ai, not nanobot
+  assert_file_contains "${MODULES_DIR}/08-nanobot.sh" 'nanobot-ai'
+  if grep -qE "pip install[^'\"]*['\"]nanobot['\"]" "${MODULES_DIR}/08-nanobot.sh"; then
+    fail "Module 08 installs bare 'nanobot' — PyPI package is 'nanobot-ai'"
+  fi
+}
+
+@test "module 08: uses dedicated venv at /opt/nanobot/.venv" {
+  assert_file_contains "${MODULES_DIR}/08-nanobot.sh" '/opt/nanobot/.venv'
+}
+
+@test "module 08: symlinks nanobot binary into /usr/local/bin" {
+  assert_file_contains "${MODULES_DIR}/08-nanobot.sh" '/usr/local/bin/nanobot'
+  assert_file_contains "${MODULES_DIR}/08-nanobot.sh" 'ln -sf'
+}
+
+@test "module 08: enforces Python 3.11 requirement" {
+  assert_file_contains "${MODULES_DIR}/08-nanobot.sh" '3.11'
+}
+
+@test "module 08: runs nanobot onboard for initial config" {
+  assert_file_contains "${MODULES_DIR}/08-nanobot.sh" 'nanobot onboard'
+  # onboard failure must be non-fatal (users may configure API keys later)
+  assert_file_contains "${MODULES_DIR}/08-nanobot.sh" 'msg_warn'
+}
+
+@test "module 08: onboard is skipped if config already exists" {
+  assert_file_contains "${MODULES_DIR}/08-nanobot.sh" 'config.json'
+}
+
+@test "module 08: is idempotent (marker + binary check)" {
+  assert_file_contains "${MODULES_DIR}/08-nanobot.sh" 'module_done'
+  assert_file_contains "${MODULES_DIR}/08-nanobot.sh" 'mark_done'
+}
+
+@test "module 08: is called in orchestrator after module 04" {
+  local m04_line m08_line
+  m04_line=$(grep -n '04-clawteam' "${PROJECT_ROOT}/install/clawteam-install.sh" | head -1 | cut -d: -f1)
+  m08_line=$(grep -n '08-nanobot' "${PROJECT_ROOT}/install/clawteam-install.sh" | head -1 | cut -d: -f1)
+  [[ -n "${m04_line}" ]] || fail "Module 04 not found in orchestrator"
+  [[ -n "${m08_line}" ]] || fail "Module 08 not found in orchestrator"
+  [[ "${m08_line}" -gt "${m04_line}" ]] \
+    || fail "Module 08 (line ${m08_line}) must come after module 04 (line ${m04_line})"
+}
+
+@test "module 08: is listed in bootstrap.sh for remote download" {
+  assert_file_contains "${PROJECT_ROOT}/install/bootstrap.sh" 'modules/08-nanobot.sh'
+}
+
+@test "module 08: nanobot venv is separate from clawteam venv" {
+  # nanobot requires Python >=3.11 and has heavy deps; keep it isolated
+  if grep -qF '/opt/clawteam/.venv' "${MODULES_DIR}/08-nanobot.sh"; then
+    fail "Module 08 reuses clawteam venv — nanobot must have its own venv at /opt/nanobot/.venv"
+  fi
+}
+
+@test "module 08: installs nanobot-ai (integration, requires root)" {
+  if [[ "$(id -u)" != "0" ]]; then skip "requires root"; fi
+  create_stub python3 "" 0
+  run _run_module "08-nanobot.sh"
+  assert_success
+  assert_file_exists "${STUBS_DIR}/venv-pip.log"
+  grep -qF "nanobot-ai" "${STUBS_DIR}/venv-pip.log"
+}
+
+@test "module 08: symlinks nanobot into /usr/local/bin (integration, requires root)" {
+  if [[ "$(id -u)" != "0" ]]; then skip "requires root"; fi
+  run _run_module "08-nanobot.sh"
+  assert_success
+  assert_stub_called_with ln "/usr/local/bin/nanobot"
+}
+
+@test "module 07: MOTD mentions nanobot" {
+  grep -q 'nanobot' "${MODULES_DIR}/07-motd.sh" \
+    || fail "Module 07 MOTD does not mention nanobot"
+}
+
+@test "module 07: MOTD shows clawteam spawn command" {
+  assert_file_contains "${MODULES_DIR}/07-motd.sh" 'clawteam spawn'
+}
+
+# ===========================================================================
 # I — lib/common.sh
 # ===========================================================================
 
@@ -630,5 +720,11 @@ _run_module() {
 @test "ShellCheck: module 07-motd.sh" {
   if ! command -v shellcheck &>/dev/null; then skip "shellcheck not installed"; fi
   run shellcheck --exclude=SC1090,SC1091,SC2154 "${MODULES_DIR}/07-motd.sh"
+  assert_success
+}
+
+@test "ShellCheck: module 08-nanobot.sh" {
+  if ! command -v shellcheck &>/dev/null; then skip "shellcheck not installed"; fi
+  run shellcheck --exclude=SC1090,SC1091,SC2154 "${MODULES_DIR}/08-nanobot.sh"
   assert_success
 }

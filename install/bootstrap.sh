@@ -29,6 +29,7 @@ dl "modules/04-clawteam.sh"
 dl "modules/05-workspace.sh"
 dl "modules/06-systemd.sh"
 dl "modules/07-motd.sh"
+dl "modules/08-nanobot.sh"
 
 # Run the orchestrator — FUNCTIONS_FILE_PATH is already exported by build_container
 exec bash "${INSTALL_ROOT}/clawteam-install.sh"
